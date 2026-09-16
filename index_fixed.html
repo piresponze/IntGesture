@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>IntGesture</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:0;background:#111;color:#fff}
+main{max-width:700px;margin:auto;padding:14px}
+.card{background:#1d1d1d;border-radius:14px;padding:14px;margin:10px 0}
+video{width:100%;border-radius:12px;background:#000;transform:scaleX(-1)}
+button,select{font:inherit;padding:10px;border:0;border-radius:10px;margin:4px}
+button{cursor:pointer}.big{font-size:28px;font-weight:800}
+.small{font-size:12px;opacity:.75}.status{padding:10px;background:#292929;border-radius:9px}
+</style>
+</head>
+<body>
+<main>
+<div class="card">
+<h1>🤖 IntGesture</h1>
+<div class="small">Phone-based hand gesture feasibility experiment</div>
+<p id="status" class="status">Starting…</p>
+<video id="video" autoplay playsinline muted></video>
+<div id="gesture" class="big">—</div>
+<div id="score" class="small">Confidence: —</div>
+<button id="start">Start camera</button>
+<button id="stop">Stop</button>
+</div>
+
+<div class="card">
+<b>Record a trial</b>
+<p class="small">Choose the gesture you are actually making, perform it, then tap Record.</p>
+<select id="actual">
+<option>Open</option><option>Fist</option><option>Point</option>
+<option>Thumbs Up</option><option>Peace</option>
+</select>
+<button id="record">Record trial</button>
+</div>
+
+<div class="card">
+<b id="summary">0 trials · 0.0% accuracy</b>
+<div id="rows" class="small" style="margin-top:10px"></div>
+<button id="download">Download CSV</button>
+<button id="clear">Clear</button>
+</div>
+
+<div class="card small">
+<b>Model status</b>
+<p id="diagnostic">Preparing diagnostics…</p>
+</div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/vision_bundle.js"
+        crossorigin="anonymous"></script>
+<script>
+const MODEL="https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task";
+const WASM="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm";
+const MAP={Open_Palm:"Open",Closed_Fist:"Fist",Pointing_Up:"Point",Thumb_Up:"Thumbs Up",Victory:"Peace"};
+let recognizer=null,stream=null,raf=null,latest=null,trials=[];
+const $=x=>document.getElementById(x);
+
+async function init(){
+  try{
+    $("diagnostic").textContent="JavaScript loaded. Loading MediaPipe…";
+    if(!window.MediaPipeTasksVision){
+      throw new Error("MediaPipe library did not load. Your network may be blocking the CDN.");
+    }
+    const {GestureRecognizer,FilesetResolver}=window.MediaPipeTasksVision;
+    $("diagnostic").textContent="Library loaded. Loading hand model (this may take up to 30 seconds)…";
+    const vision=await FilesetResolver.forVisionTasks(WASM);
+    $("diagnostic").textContent="Vision engine loaded. Loading gesture model…";
+    recognizer=await GestureRecognizer.createFromOptions(vision,{
+      baseOptions:{modelAssetPath:MODEL,delegate:"CPU"},
+      runningMode:"VIDEO",
+      numHands:1
+    });
+    $("status").textContent="Ready! Tap Start camera.";
+    $("diagnostic").textContent="Model loaded successfully.";
+  }catch(e){
+    console.error(e);
+    $("status").textContent="Model could not load.";
+    $("diagnostic").textContent="ERROR: "+(e?.message||e);
+  }
+}
+async function start(){
+  if(!recognizer){alert("The model is not ready yet. Read the Model status message below.");return}
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:false});
+    $("video").srcObject=stream;
+    await $("video").play();
+    $("status").textContent="Camera active — show one hand.";
+    loop();
+  }catch(e){$("status").textContent="Camera error: "+e.message}
+}
+function stop(){
+  cancelAnimationFrame(raf);
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=null;$("video").srcObject=null;$("status").textContent="Camera stopped.";
+}
+function loop(){
+  if(!stream)return;
+  try{
+    latest=recognizer.recognizeForVideo($("video"),performance.now());
+    let n="Unknown",s=0;
+    if(latest.gestures?.[0]?.[0]){
+      const g=latest.gestures[0][0];
+      n=MAP[g.categoryName]||g.categoryName||"Unknown";s=g.score||0;
+    }
+    $("gesture").textContent=n;
+    $("score").textContent="Confidence: "+(s*100).toFixed(1)+"%";
+  }catch(e){$("status").textContent="Recognition error: "+e.message}
+  raf=requestAnimationFrame(loop);
+}
+$("start").onclick=start;$("stop").onclick=stop;
+
+$("record").onclick=()=>{
+  if(!latest?.landmarks?.length){alert("No hand detected. Start the camera and show one hand.");return}
+  let n="Unknown",s=0;
+  if(latest.gestures?.[0]?.[0]){
+    const g=latest.gestures[0][0];
+    n=MAP[g.categoryName]||g.categoryName||"Unknown";s=g.score||0;
+  }
+  trials.push({time:new Date().toISOString(),actual:$("actual").value,detected:n,confidence:s});
+  render();
+};
+function render(){
+  const correct=trials.filter(t=>t.actual===t.detected).length;
+  $("summary").textContent=trials.length+" trials · "+(trials.length?(correct/trials.length*100).toFixed(1):"0.0")+"% accuracy";
+  $("rows").innerHTML=trials.slice(-20).reverse().map((t,i)=>
+    `${trials.length-i}. Actual: ${t.actual} | Detected: ${t.detected} | ${(t.confidence*100).toFixed(1)}% | ${t.actual===t.detected?"✓":"✗"}`
+  ).join("<br>");
+}
+$("download").onclick=()=>{
+  if(!trials.length){alert("No trials yet.");return}
+  const lines=["timestamp,actual,detected,confidence"];
+  trials.forEach(t=>lines.push([t.time,t.actual,t.detected,t.confidence.toFixed(6)].map(v=>`"${v}"`).join(",")));
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([lines.join("\n")],{type:"text/csv"}));
+  a.download="IntGesture_trials.csv";a.click();
+};
+$("clear").onclick=()=>{trials=[];render()};
+init();
+</script>
+</body>
+</html>
